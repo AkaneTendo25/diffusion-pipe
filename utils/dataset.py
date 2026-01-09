@@ -77,6 +77,118 @@ def dedup_and_sort(values):
     return np.array(values)
 
 
+def parse_bucket_formula(formula: str) -> dict:
+    """
+    Parse bucket formula like "4N+1", "8N+1", etc.
+    Returns dict with 'multiplier' and 'offset' keys.
+
+    Examples:
+        "4N+1" -> {"multiplier": 4, "offset": 1}
+        "8N+1" -> {"multiplier": 8, "offset": 1}
+        "16N" -> {"multiplier": 16, "offset": 0}
+    """
+    import re
+    formula = formula.strip().upper()
+
+    # Pattern: optional coefficient, then N, then optional +/- offset
+    pattern = r'^(\d+)?N([+-]\d+)?$'
+    match = re.match(pattern, formula)
+
+    if not match:
+        raise ValueError(
+            f"Invalid bucket formula: '{formula}'. "
+            f"Expected format like '4N+1', '8N+1', '16N', etc."
+        )
+
+    multiplier = int(match.group(1)) if match.group(1) else 1
+    offset_str = match.group(2) if match.group(2) else '+0'
+    offset = int(offset_str)
+
+    if multiplier <= 0:
+        raise ValueError(f"Multiplier must be positive, got {multiplier}")
+
+    return {"multiplier": multiplier, "offset": offset}
+
+
+def snap_to_formula(value: int, multiplier: int, offset: int) -> int:
+    """
+    Snap a value to the nearest formula value.
+    Formula: multiplier * N + offset
+
+    Examples:
+        snap_to_formula(15, 4, 1) -> 13  (4*3+1)
+        snap_to_formula(17, 4, 1) -> 17  (4*4+1)
+        snap_to_formula(19, 4, 1) -> 17  (4*4+1)
+    """
+    if value < offset:
+        return offset
+
+    # Solve for N: N = (value - offset) / multiplier
+    n = (value - offset) / multiplier
+
+    # Try both floor and ceil, return closest
+    n_floor = int(n)
+    n_ceil = n_floor + 1
+
+    candidate_floor = multiplier * n_floor + offset
+    candidate_ceil = multiplier * n_ceil + offset
+
+    if abs(value - candidate_floor) <= abs(value - candidate_ceil):
+        return candidate_floor
+    else:
+        return candidate_ceil
+
+
+def generate_buckets_from_formula_and_scan(
+    video_frame_lengths: set,
+    bucket_formula: str,
+    min_frames: int = 1,
+    max_frames: int = None
+) -> list:
+    """
+    Generate frame buckets by snapping each unique video length to formula.
+
+    Args:
+        video_frame_lengths: Set of all unique frame counts in dataset
+        bucket_formula: Formula string like "4N+1"
+        min_frames: Minimum bucket value (default 1 for images)
+        max_frames: Maximum bucket value (optional)
+
+    Returns:
+        Sorted list of unique bucket values
+    """
+    formula = parse_bucket_formula(bucket_formula)
+    multiplier = formula["multiplier"]
+    offset = formula["offset"]
+
+    buckets = set()
+
+    # Always include image bucket if min_frames is 1
+    if min_frames == 1:
+        buckets.add(1)
+
+    for frame_count in video_frame_lengths:
+        if frame_count == 1:
+            # Images always go to bucket 1
+            continue
+
+        snapped = snap_to_formula(frame_count, multiplier, offset)
+
+        if snapped >= min_frames:
+            if max_frames is None or snapped <= max_frames:
+                buckets.add(snapped)
+
+    result = sorted(list(buckets))
+
+    if len(result) == 0:
+        raise ValueError(
+            f"Formula '{bucket_formula}' generated no valid buckets. "
+            f"Check min_frames={min_frames} and max_frames={max_frames} settings."
+        )
+
+    return result
+
+
 def _map_and_cache(dataset, map_fn, cache_dir, cache_file_prefix='', new_fingerprint_args=None, regenerate_cache=False, caching_batch_size=1):
     new_fingerprint_args = [] if new_fingerprint_args is None else new_fingerprint_args
     new_fingerprint_args.append(dataset._fingerprint)
@@ -437,6 +549,15 @@ class DirectoryDataset:
         self.size_buckets = directory_config.get('size_buckets', dataset_config.get('size_buckets', None))
         self.use_size_buckets = (self.size_buckets is not None)
         if self.use_size_buckets:
+            # Validate: cannot use bucket_formula with size_buckets
+            bucket_formula = directory_config.get('bucket_formula', dataset_config.get('bucket_formula', None))
+            if bucket_formula is not None:
+                raise ValueError(
+                    "Cannot use 'bucket_formula' with 'size_buckets'. "
+                    "Formula mode only works with aspect ratio bucketing. "
+                    "Either remove 'size_buckets' or remove 'bucket_formula'."
+                )
+
             # sort size bucket from longest frame length to shortest
             self.size_buckets.sort(key=lambda t: t[-1], reverse=True)
             self.size_buckets = np.array(self.size_buckets)
@@ -480,12 +601,125 @@ class DirectoryDataset:
             self.ars = np.geomspace(min_ar, max_ar, num=num_ar_buckets)
         self.ars = dedup_and_sort(self.ars)
         self.log_ars = np.log(self.ars)
-        frame_buckets = self.directory_config.get('frame_buckets', self.dataset_config.get('frame_buckets', [1]))
+
+        # Determine frame buckets: formula mode vs manual mode
+        bucket_formula = self.directory_config.get('bucket_formula', self.dataset_config.get('bucket_formula', None))
+
+        if bucket_formula is not None:
+            # Formula mode: auto-generate buckets from dataset scan
+            if is_main_process():
+                print(f'Using bucket formula: {bucket_formula}')
+
+            # Scan dataset to collect frame lengths
+            frame_lengths = self._scan_dataset_for_frame_lengths()
+
+            # Generate buckets from formula
+            min_frames = self.directory_config.get('min_bucket_frames', self.dataset_config.get('min_bucket_frames', 1))
+            max_frames = self.directory_config.get('max_bucket_frames', self.dataset_config.get('max_bucket_frames', None))
+
+            frame_buckets = generate_buckets_from_formula_and_scan(
+                frame_lengths,
+                bucket_formula,
+                min_frames=min_frames,
+                max_frames=max_frames
+            )
+
+            if is_main_process():
+                print(f'Generated {len(frame_buckets)} buckets from formula: {frame_buckets}')
+
+                # Print mapping for debugging
+                if len(frame_lengths) < 50:  # Only print if reasonable number of lengths
+                    print('Video-to-bucket mapping:')
+                    for length in sorted(frame_lengths):
+                        if length == 1:
+                            continue  # Skip image bucket
+                        # Find which bucket this length maps to
+                        formula_dict = parse_bucket_formula(bucket_formula)
+                        snapped = snap_to_formula(length, formula_dict['multiplier'], formula_dict['offset'])
+                        padding = snapped - length
+                        print(f'  {length} frames -> bucket {snapped} (padding: {padding} frames)')
+        else:
+            # Manual mode: use explicit frame_buckets from config
+            frame_buckets = self.directory_config.get('frame_buckets', self.dataset_config.get('frame_buckets', [1]))
+
+            # Warn if both are specified
+            if 'frame_buckets' in self.directory_config or 'frame_buckets' in self.dataset_config:
+                if is_main_process():
+                    print('Using manual frame_buckets (no bucket_formula specified)')
+
+        # Ensure image bucket exists
         if 1 not in frame_buckets:
-            # always have an image bucket for convenience
             frame_buckets.append(1)
         frame_buckets.sort()
         self.frame_buckets = np.array(frame_buckets)
+
+    def _scan_dataset_for_frame_lengths(self):
+        """
+        Scan all videos in dataset to collect unique frame lengths.
+        Uses cached results if available.
+
+        Returns:
+            Set of all unique frame counts found in dataset
+        """
+        cache_file = self.cache_dir / 'metadata' / 'frame_lengths.json'
+
+        # Try to load from cache
+        if cache_file.exists():
+            with open(cache_file) as f:
+                frame_lengths = set(json.load(f))
+            if is_main_process():
+                print(f'Loaded {len(frame_lengths)} unique frame lengths from cache: {cache_file}')
+            return frame_lengths
+
+        if is_main_process():
+            print(f'Scanning dataset for video frame lengths in: {self.path}')
+
+        frame_lengths = set()
+
+        files = list(self.path.glob('*'))
+        files.sort()  # deterministic order
+
+        for file in tqdm(files, desc='Scanning videos', disable=not is_main_process()):
+            if not file.is_file():
+                continue
+
+            # Handle tar files
+            if file.suffix == '.tar':
+                try:
+                    with tarfile.TarFile(file) as tar_f:
+                        for name in tar_f.getnames():
+                            if Path(name).suffix in VIDEO_EXTENSIONS:
+                                try:
+                                    extracted_file = tar_f.extractfile(name)
+                                    meta = imageio.v3.immeta(extracted_file)
+                                    frames = int(self.framerate * meta['duration'])
+                                    frame_lengths.add(frames)
+                                    extracted_file.close()
+                                except Exception as e:
+                                    logger.warning(f'Could not read video {name} from {file}: {e}')
+                except Exception as e:
+                    logger.warning(f'Could not open tar file {file}: {e}')
+            # Handle direct video files
+            elif file.suffix in VIDEO_EXTENSIONS:
+                try:
+                    meta = imageio.v3.immeta(str(file))
+                    frames = int(self.framerate * meta['duration'])
+                    frame_lengths.add(frames)
+                except Exception as e:
+                    logger.warning(f'Could not read video {file}: {e}')
+
+        # Always include 1 for images
+        frame_lengths.add(1)
+
+        # Save to cache
+        os.makedirs(cache_file.parent, exist_ok=True)
+        with open(cache_file, 'w') as f:
+            json.dump(sorted(list(frame_lengths)), f)
+
+        if is_main_process():
+            print(f'Found {len(frame_lengths)} unique frame lengths: {sorted(frame_lengths)}')
+
+        return frame_lengths
 
     def validate(self):
         resolutions = self.directory_config.get('resolutions', self.dataset_config.get('resolutions', []))
