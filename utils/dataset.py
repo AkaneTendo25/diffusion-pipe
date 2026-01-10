@@ -852,7 +852,12 @@ class DirectoryDataset:
             mask_files = []
             control_files = []
             for file in tqdm(files):
-                if not file.is_file() or file.suffix == self.caption_extension or file.suffix == '.npz' or file.suffix == '.json' or file.suffix == '.parquet' or file.suffix == '.bak':
+                # Skip non-media files: captions, metadata, etc.
+                # Also skip files with .txt anywhere in the extension (handles .en.txt, .ru.txt, etc.)
+                if (not file.is_file() or
+                    file.suffix in ['.npz', '.json', '.parquet', '.bak'] or
+                    file.suffix == self.caption_extension or
+                    '.txt' in ''.join(file.suffixes)):  # Skip compound .txt extensions
                     continue
                 for image_spec in process_file(file):
                     image_file = Path(image_spec[1])
