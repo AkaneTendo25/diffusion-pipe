@@ -574,6 +574,10 @@ class DirectoryDataset:
         self.shuffle = directory_config.get('cache_shuffle_num', dataset_config.get('cache_shuffle_num', 0))
         self.directory_config['cache_shuffle_num'] = self.shuffle # Make accessible if it wasn't yet, for picking one out
         self.shuffle_delimiter = directory_config.get('cache_shuffle_delimiter', dataset_config.get('cache_shuffle_delimiter', ", "))
+        self.caption_extension = directory_config.get('caption_extension', dataset_config.get('caption_extension', '.txt'))
+        # Ensure caption extension starts with a dot
+        if not self.caption_extension.startswith('.'):
+            self.caption_extension = '.' + self.caption_extension
         self.path = Path(self.directory_config['path'])
         self.mask_path = Path(self.directory_config['mask_path']) if 'mask_path' in self.directory_config else None
         self.control_path = Path(self.directory_config['control_path']) if 'control_path' in self.directory_config else None
@@ -848,11 +852,11 @@ class DirectoryDataset:
             mask_files = []
             control_files = []
             for file in tqdm(files):
-                if not file.is_file() or file.suffix == '.txt' or file.suffix == '.npz' or file.suffix == '.json' or file.suffix == '.parquet' or file.suffix == '.bak':
+                if not file.is_file() or file.suffix == self.caption_extension or file.suffix == '.npz' or file.suffix == '.json' or file.suffix == '.parquet' or file.suffix == '.bak':
                     continue
                 for image_spec in process_file(file):
                     image_file = Path(image_spec[1])
-                    caption_file = image_file.with_suffix('.txt')
+                    caption_file = image_file.with_suffix(self.caption_extension)
                     if has_captions_json or not os.path.exists(caption_file):
                         caption_file = ''
                     image_specs.append(image_spec)

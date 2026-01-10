@@ -77,8 +77,13 @@ frame_buckets = [1, 33]
 # "tag1, tag2, tag3" has ", " as delimiter and will possibly be shuffled like "tag3, tag1, tag2". "tag1;tag2;tag3" has ";" as delimiter and will possibly be shuffled like "tag2;tag1;tag3".
 # cache_shuffle_delimiter = ", "
 
+# Caption file extension. Defaults to ".txt"
+# You can use any extension you want: ".caption", ".txt", ".cap", etc.
+# The dot can be included or omitted - both ".txt" and "txt" work the same.
+# caption_extension = ".txt"
+
 [[directory]]
-# Path to directory of images/videos, and corresponding caption files. The caption files should match the media file name, but with a .txt extension.
+# Path to directory of images/videos, and corresponding caption files. The caption files should match the media file name, but with the configured caption_extension (default: .txt).
 # A missing caption file will log a warning, but then just train using an empty caption.
 path = '/home/anon/data/images/grayscale'
 
@@ -105,3 +110,5 @@ num_repeats = 1
 # [[directory]]
 # path = '/home/anon/data/images/something_else'
 # num_repeats = 5
+# # Override caption extension for this specific directory
+# caption_extension = ".caption"
