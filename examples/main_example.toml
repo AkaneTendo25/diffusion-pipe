@@ -102,10 +102,14 @@ caching_batch_size = 1
 # How often deepspeed logs to console.
 steps_per_print = 1
 # How to extract video clips for training from a single input video file.
+# DEPRECATED: video_clip_mode has been moved to the dataset config level (see dataset.toml).
+# This model-level setting is kept for backwards compatibility but will be ignored if
+# video_clip_mode is set in the dataset config.
 # The video file is first assigned to one of the configured frame buckets, but then we must extract one or more clips of exactly the right
 # number of frames for that bucket.
 # single_beginning: one clip starting at the beginning of the video
 # single_middle: one clip from the middle of the video (cutting off the start and end equally)
+# multiple_sequential: split video into multiple non-overlapping chunks (NEW)
 # default is single_beginning
 video_clip_mode = 'single_beginning'
 

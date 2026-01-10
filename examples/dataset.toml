@@ -56,6 +56,21 @@ frame_buckets = [1, 33]
 # NOTE: If bucket_formula is set, the frame_buckets setting above is ignored.
 # You can use either formula mode OR manual frame_buckets, not both.
 
+# VIDEO CLIP MODE: How to extract clips from videos
+# Controls how video files are split into training examples during metadata generation.
+# Options:
+#   'single_beginning' (default): Extract one clip from the start of each video
+#   'single_middle': Extract one clip from the middle of each video
+#   'multiple_sequential': Split each video into multiple non-overlapping chunks
+#
+# Example with 'multiple_sequential':
+#   Video with 100 frames, target_frames=30
+#   → Creates 3 training examples (frames 0-29, 30-59, 60-89), discards remaining frames (90-99)
+#   → All chunks share the same caption from the original video
+#
+# This setting is applied during metadata generation, so changing it requires regenerating metadata cache.
+# video_clip_mode = 'single_beginning'
+
 # Shuffle tags before caching, 0 to keep original caption (unless shuffle_tags is set to true). Increases caching time a tiny bit for higher values.
 # cache_shuffle_num = 10
 # Delimiter for tags, only used if cache_shuffle_num is not 0. Defaults to ", ".

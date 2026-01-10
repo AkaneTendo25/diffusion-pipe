@@ -545,6 +545,9 @@ class DirectoryDataset:
         self.framerate = framerate
         self.round_to_multiple = round_to_multiple
         self.enable_ar_bucket = directory_config.get('enable_ar_bucket', dataset_config.get('enable_ar_bucket', False))
+        self.video_clip_mode = directory_config.get('video_clip_mode', dataset_config.get('video_clip_mode', 'single_beginning'))
+        if is_main_process():
+            print(f'using video_clip_mode={self.video_clip_mode}')
         # Configure directly from user-specified size buckets.
         self.size_buckets = directory_config.get('size_buckets', dataset_config.get('size_buckets', None))
         self.use_size_buckets = (self.size_buckets is not None)
@@ -952,7 +955,7 @@ class DirectoryDataset:
             if self.directory_config['shuffle_tags'] and self.shuffle == 0: # backwards compatibility
                 self.shuffle = 1
             captions = shuffle_captions(captions, self.shuffle, self.shuffle_delimiter, self.directory_config['caption_prefix'])
-            empty_return = {'image_spec': [], 'mask_file': [], 'caption': [], 'ar_bucket': [], 'size_bucket': [], 'is_video': []}
+            empty_return = {'image_spec': [], 'mask_file': [], 'caption': [], 'ar_bucket': [], 'size_bucket': [], 'is_video': [], 'clip_index': [], 'num_clips': []}
             if self.control_path:
                 empty_return['control_file'] = []
 
@@ -1013,16 +1016,64 @@ class DirectoryDataset:
                     return empty_return
                 size_bucket = None
 
-            ret = {
-                'image_spec': [image_spec],
-                'mask_file': [example['mask_file'][0]],
-                'caption': [captions],
-                'ar_bucket': [ar_bucket],
-                'size_bucket': [size_bucket],
-                'is_video': [is_video],
-            }
-            if self.control_path:
-                ret['control_file'] = [example['control_file'][0]]
+            # Get target frames for chunk calculation
+            if self.use_size_buckets:
+                target_frames = size_bucket[-1]
+            else:
+                target_frames = ar_bucket[-1]
+
+            # Handle video clip extraction mode
+            if is_video and self.video_clip_mode == 'multiple_sequential':
+                # Split video into non-overlapping chunks
+                num_chunks = frames // target_frames
+                if num_chunks == 0:
+                    # Video too short for even one chunk
+                    print(f'video with frames={frames} is being skipped because it is shorter than target_frames={target_frames}')
+                    return empty_return
+
+                # Create one metadata entry per chunk
+                ret = {
+                    'image_spec': [image_spec] * num_chunks,
+                    'mask_file': [example['mask_file'][0]] * num_chunks,
+                    'caption': [captions] * num_chunks,
+                    'ar_bucket': [ar_bucket] * num_chunks,
+                    'size_bucket': [size_bucket] * num_chunks,
+                    'is_video': [is_video] * num_chunks,
+                    'clip_index': list(range(num_chunks)),
+                    'num_clips': [num_chunks] * num_chunks,
+                }
+                if self.control_path:
+                    ret['control_file'] = [example['control_file'][0]] * num_chunks
+            elif is_video and self.video_clip_mode == 'single_middle':
+                # Extract one clip from the middle of the video
+                # Calculate the start frame to center the clip
+                start_frame = int((frames - target_frames) / 2)
+                ret = {
+                    'image_spec': [image_spec],
+                    'mask_file': [example['mask_file'][0]],
+                    'caption': [captions],
+                    'ar_bucket': [ar_bucket],
+                    'size_bucket': [size_bucket],
+                    'is_video': [is_video],
+                    'clip_index': [start_frame],  # Use actual frame index for single_middle
+                    'num_clips': [1],
+                }
+                if self.control_path:
+                    ret['control_file'] = [example['control_file'][0]]
+            else:
+                # Single clip from beginning (default) or images
+                ret = {
+                    'image_spec': [image_spec],
+                    'mask_file': [example['mask_file'][0]],
+                    'caption': [captions],
+                    'ar_bucket': [ar_bucket],
+                    'size_bucket': [size_bucket],
+                    'is_video': [is_video],
+                    'clip_index': [0],
+                    'num_clips': [1],
+                }
+                if self.control_path:
+                    ret['control_file'] = [example['control_file'][0]]
             return ret
 
         return fn
@@ -1259,17 +1310,17 @@ def _cache_fn(datasets, queue, preprocess_media_file_fn, num_text_encoders, rege
         image_specs = []
         captions = []
         control_tensors_and_masks = []
-        for i, (image_spec, mask_path, size_bucket, caption) in enumerate(
-            zip(example['image_spec'], example['mask_file'], example['size_bucket'], example['caption'])
+        for i, (image_spec, mask_path, size_bucket, caption, clip_index, num_clips) in enumerate(
+            zip(example['image_spec'], example['mask_file'], example['size_bucket'], example['caption'], example['clip_index'], example['num_clips'])
         ):
             assert size_bucket == first_size_bucket
-            items = preprocess_media_file_fn(image_spec, mask_path, size_bucket)
+            items = preprocess_media_file_fn(image_spec, mask_path, size_bucket, clip_index, num_clips)
             tensors_and_masks.extend(items)
             image_specs.extend([image_spec] * len(items))
             captions.extend([caption] * len(items))
             if is_edit_dataset:
                 control_file = example['control_file'][i]
-                control_items = preprocess_media_file_fn((None, control_file), None, size_bucket)
+                control_items = preprocess_media_file_fn((None, control_file), None, size_bucket, clip_index, num_clips)
                 assert len(control_items) == 1
                 assert len(items) == 1
                 control_tensors_and_masks.append(control_items[0])

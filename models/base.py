@@ -87,7 +87,7 @@ class PreprocessMediaFile:
         for tar_f in self.tarfile_map.values():
             tar_f.close()
 
-    def __call__(self, spec, mask_filepath, size_bucket=None):
+    def __call__(self, spec, mask_filepath, size_bucket=None, clip_index=0, num_clips=1):
         is_video = (Path(spec[1]).suffix in VIDEO_EXTENSIONS)
 
         if spec[0] is None:
@@ -156,8 +156,31 @@ class PreprocessMediaFile:
         if not is_video:
             return [(resized_video, mask)]
         else:
-            videos = extract_clips(resized_video, frames_rounded, self.video_clip_mode)
-            return [(video, mask) for video in videos]
+            # Extract specific chunk based on clip_index and num_clips
+            # num_clips > 1: multiple_sequential mode, clip_index is chunk number (0, 1, 2, ...)
+            # num_clips == 1: single clip mode, clip_index is the actual start frame
+            if num_clips > 1:
+                # multiple_sequential: clip_index is chunk number
+                start_frame = clip_index * frames_rounded
+            else:
+                # single_beginning/single_middle: clip_index is start frame directly
+                start_frame = clip_index
+
+            end_frame = start_frame + frames_rounded
+
+            # Validate that we have enough frames
+            if end_frame > resized_video.shape[1]:
+                # This shouldn't happen if metadata was generated correctly,
+                # but handle it gracefully just in case
+                print(f'Warning: clip extraction [{start_frame}:{end_frame}] exceeds video length {resized_video.shape[1]} frames. '
+                      f'This may indicate a bug in metadata generation.')
+                end_frame = resized_video.shape[1]
+                if start_frame >= end_frame:
+                    print(f'Error: start_frame={start_frame} >= end_frame={end_frame}. Skipping this video.')
+                    return []
+
+            video_chunk = resized_video[:, start_frame:end_frame, ...]
+            return [(video_chunk, mask)]
 
 
 class BasePipeline:
